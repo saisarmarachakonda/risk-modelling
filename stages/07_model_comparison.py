@@ -274,9 +274,10 @@ def _apply_class_weight(model_cfg: Dict, imb_cfg: Dict) -> Any:
 def _run_experiment(
     X_tr: np.ndarray, y_tr: np.ndarray,
     X_te: np.ndarray, y_te: np.ndarray,
+    X_oot: np.ndarray, y_oot: np.ndarray,
     model, cv, seed: int,
-) -> Dict[str, float]:
-    """Run one experiment: CV + test evaluation."""
+) -> Dict[str, Any]:
+    """Run one experiment: CV + test evaluation + OOT evaluation."""
     from sklearn.model_selection import cross_validate
     from sklearn.metrics import (
         roc_auc_score, average_precision_score,
@@ -289,7 +290,7 @@ def _run_experiment(
     result = {}
     try:
         t0 = time.perf_counter()
-        # 3-fold CV
+        # 3-fold CV on Train set
         cv_res = cross_validate(
             copy.deepcopy(model), X_tr, y_tr,
             cv=cv, scoring="roc_auc", n_jobs=1,
@@ -297,33 +298,52 @@ def _run_experiment(
         result["cv_roc_auc_mean"] = round(float(cv_res["test_score"].mean()), 4)
         result["cv_roc_auc_std"]  = round(float(cv_res["test_score"].std()),  4)
 
-        # Fit on full train, predict test
+        # Fit on full Train set
         model.fit(X_tr, y_tr)
-        y_prob = model.predict_proba(X_te)[:, 1]
-        y_pred = (y_prob >= 0.5).astype(int)
+        
+        # Test evaluation
+        y_prob_te = model.predict_proba(X_te)[:, 1]
+        y_pred_te = (y_prob_te >= 0.5).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_te, y_pred_te).ravel()
+        spec_te = tn / max(tn + fp, 1)
+        ks_te   = float(np.max(np.abs(
+            np.cumsum(y_te[np.argsort(-y_prob_te)])   / max(y_te.sum(), 1) -
+            np.cumsum(1 - y_te[np.argsort(-y_prob_te)]) / max((1-y_te).sum(), 1)
+        )))
 
-        tn, fp, fn, tp = confusion_matrix(y_te, y_pred).ravel()
-        spec = tn / max(tn + fp, 1)
-        ks   = float(np.max(np.abs(
-            np.cumsum(y_te[np.argsort(-y_prob)])   / max(y_te.sum(), 1) -
-            np.cumsum(1 - y_te[np.argsort(-y_prob)]) / max((1-y_te).sum(), 1)
+        # OOT evaluation
+        y_prob_oot = model.predict_proba(X_oot)[:, 1]
+        y_pred_oot = (y_prob_oot >= 0.5).astype(int)
+        tn_o, fp_o, fn_o, tp_o = confusion_matrix(y_oot, y_pred_oot).ravel()
+        spec_oot = tn_o / max(tn_o + fp_o, 1)
+        ks_oot   = float(np.max(np.abs(
+            np.cumsum(y_oot[np.argsort(-y_prob_oot)])   / max(y_oot.sum(), 1) -
+            np.cumsum(1 - y_oot[np.argsort(-y_prob_oot)]) / max((1-y_oot).sum(), 1)
         )))
 
         result.update({
-            "test_roc_auc":  round(float(roc_auc_score(y_te, y_prob)), 4),
-            "test_pr_auc":   round(float(average_precision_score(y_te, y_prob)), 4),
-            "test_f1":       round(float(f1_score(y_te, y_pred, zero_division=0)), 4),
-            "test_recall":   round(float(recall_score(y_te, y_pred, zero_division=0)), 4),
-            "test_precision":round(float(precision_score(y_te, y_pred, zero_division=0)), 4),
-            "test_specificity": round(float(spec), 4),
-            "test_mcc":      round(float(matthews_corrcoef(y_te, y_pred)), 4),
-            "test_brier":    round(float(brier_score_loss(y_te, y_prob)), 4),
-            "test_ks":       round(float(ks), 4),
+            "test_roc_auc":  round(float(roc_auc_score(y_te, y_prob_te)), 4),
+            "test_pr_auc":   round(float(average_precision_score(y_te, y_prob_te)), 4),
+            "test_f1":       round(float(f1_score(y_te, y_pred_te, zero_division=0)), 4),
+            "test_recall":   round(float(recall_score(y_te, y_pred_te, zero_division=0)), 4),
+            "test_precision":round(float(precision_score(y_te, y_pred_te, zero_division=0)), 4),
+            "test_specificity": round(float(spec_te), 4),
+            "test_ks":       round(float(ks_te), 4),
+            
+            "oot_roc_auc":   round(float(roc_auc_score(y_oot, y_prob_oot)), 4),
+            "oot_pr_auc":    round(float(average_precision_score(y_oot, y_prob_oot)), 4),
+            "oot_f1":        round(float(f1_score(y_oot, y_pred_oot, zero_division=0)), 4),
+            "oot_recall":    round(float(recall_score(y_oot, y_pred_oot, zero_division=0)), 4),
+            "oot_precision": round(float(precision_score(y_oot, y_pred_oot, zero_division=0)), 4),
+            "oot_specificity": round(float(spec_oot), 4),
+            "oot_ks":        round(float(ks_oot), 4),
+
             "train_time_s":  round(time.perf_counter() - t0, 2),
             "error": "",
         })
+        
         # Store for ROC curves
-        fpr, tpr, _ = roc_curve(y_te, y_prob)
+        fpr, tpr, _ = roc_curve(y_oot, y_prob_oot)
         result["_fpr"] = fpr.tolist()
         result["_tpr"] = tpr.tolist()
 
@@ -332,8 +352,11 @@ def _run_experiment(
             "cv_roc_auc_mean": 0.0, "cv_roc_auc_std": 0.0,
             "test_roc_auc": 0.0, "test_pr_auc": 0.0,
             "test_f1": 0.0, "test_recall": 0.0, "test_precision": 0.0,
-            "test_specificity": 0.0, "test_mcc": 0.0,
-            "test_brier": 1.0, "test_ks": 0.0, "train_time_s": 0.0,
+            "test_specificity": 0.0, "test_ks": 0.0,
+            "oot_roc_auc": 0.0, "oot_pr_auc": 0.0,
+            "oot_f1": 0.0, "oot_recall": 0.0, "oot_precision": 0.0,
+            "oot_specificity": 0.0, "oot_ks": 0.0,
+            "train_time_s": 0.0,
             "error": str(e)[:100],
         })
     return result
@@ -350,6 +373,8 @@ def _run_single_task(
     y_tr: np.ndarray,
     X_te_raw: np.ndarray,
     y_te: np.ndarray,
+    X_oot_raw: np.ndarray,
+    y_oot: np.ndarray,
     feat_idx: Dict[str, int],
     cv_folds: int,
     seed: int,
@@ -366,15 +391,18 @@ def _run_single_task(
     fs_idx = [feat_idx[c] for c in fs_cols if c in feat_idx]
     X_tr_fs = X_tr_raw[:, fs_idx]
     X_te_fs = X_te_raw[:, fs_idx]
+    X_oot_fs = X_oot_raw[:, fs_idx]
 
     # 2. Scale features
     if scaler_cfg["obj"] is not None:
         sc = copy.deepcopy(scaler_cfg["obj"])
         X_tr_sc = sc.fit_transform(X_tr_fs)
         X_te_sc = sc.transform(X_te_fs)
+        X_oot_sc = sc.transform(X_oot_fs)
     else:
         X_tr_sc = X_tr_fs
         X_te_sc = X_te_fs
+        X_oot_sc = X_oot_fs
 
     # 3. Apply class weight
     model = _apply_class_weight(model_cfg, imb_cfg)
@@ -403,7 +431,7 @@ def _run_single_task(
         y_tr_use = y_tr[keep]
 
     # 5. Run experiment
-    res = _run_experiment(X_tr_use, y_tr_use, X_te_sc, y_te, model, cv, seed)
+    res = _run_experiment(X_tr_use, y_tr_use, X_te_sc, y_te, X_oot_sc, y_oot, model, cv, seed)
 
     return {
         "rank":             0,
@@ -424,13 +452,21 @@ def _run_single_task(
         "test_precision":   res.get("test_precision",  0.0),
         "test_specificity": res.get("test_specificity",0.0),
         "test_ks":          res.get("test_ks",         0.0),
-        "test_mcc":         res.get("test_mcc",        0.0),
-        "test_brier":       res.get("test_brier",      1.0),
+        
+        "oot_roc_auc":      res.get("oot_roc_auc",     0.0),
+        "oot_pr_auc":       res.get("oot_pr_auc",      0.0),
+        "oot_f1":           res.get("oot_f1",          0.0),
+        "oot_recall":       res.get("oot_recall",      0.0),
+        "oot_precision":    res.get("oot_precision",   0.0),
+        "oot_specificity":  res.get("oot_specificity", 0.0),
+        "oot_ks":           res.get("oot_ks",          0.0),
+        
         "train_time_s":     res.get("train_time_s",    0.0),
         "error":            res.get("error",           ""),
         "_fpr":             res.get("_fpr",            []),
         "_tpr":             res.get("_tpr",            []),
     }
+
 
 
 def run(
@@ -504,25 +540,35 @@ def run(
         ][:50]
 
     log.info(f"Loading {sample_n:,}-row sample with {len(valid_feats)} numeric features…")
-    cols_to_load = valid_feats + [target]
+    grp_col = config.get("data", {}).get("group_column", "sample_group")
+    cols_to_load = valid_feats + [target, grp_col]
     df       = loader.sample_columns(cols_to_load, n=sample_n, seed=seed)
     feat_cols = [c for c in valid_feats if c in df.columns]
-    X_all    = df.select(feat_cols).fill_null(0).to_numpy().astype(np.float32)
-    y_all    = df[target].fill_null(0).to_numpy().astype(np.int32)
-    log.info(f"Feature matrix: {X_all.shape[0]:,} rows x {X_all.shape[1]} cols")
+
+    # Pre-split using the pre-defined group column!
+    df_tr = df.filter(pl.col(grp_col) == "Train")
+    df_te = df.filter(pl.col(grp_col) == "Test")
+    df_oot = df.filter(pl.col(grp_col) == "OOT")
+
+    X_tr_raw = df_tr.select(feat_cols).fill_null(0).to_numpy().astype(np.float32)
+    y_tr = df_tr[target].fill_null(0).to_numpy().astype(np.int32)
+
+    X_te_raw = df_te.select(feat_cols).fill_null(0).to_numpy().astype(np.float32)
+    y_te = df_te[target].fill_null(0).to_numpy().astype(np.int32)
+
+    X_oot_raw = df_oot.select(feat_cols).fill_null(0).to_numpy().astype(np.float32)
+    y_oot = df_oot[target].fill_null(0).to_numpy().astype(np.int32)
+
+    log.info(f"Train set: {X_tr_raw.shape[0]:,} rows, Test set: {X_te_raw.shape[0]:,} rows, OOT set: {X_oot_raw.shape[0]:,} rows")
+    log.info(f"Features: {X_tr_raw.shape[1]}")
 
     # Recompute imbalance ratio from data if not in prep_info
     if imb_ratio <= 1.0:
-        _pos = int(y_all.sum())
-        _neg = len(y_all) - _pos
+        _pos = int(y_tr.sum())
+        _neg = len(y_tr) - _pos
         imb_ratio = _neg / max(_pos, 1)
     log.info(f"Class imbalance ratio: {imb_ratio:.1f}:1")
 
-
-    # Train / test split
-    X_tr_raw, X_te_raw, y_tr, y_te = train_test_split(
-        X_all, y_all, test_size=TEST_FRAC, stratify=y_all, random_state=seed
-    )
 
     # ── Build feature sets ─────────────────────────────────────────────
     log.info("Building feature sets (7 methods)…")
@@ -565,7 +611,7 @@ def run(
         raw_results = Parallel(n_jobs=-1, verbose=1, backend="threading")(
             delayed(_run_single_task)(
                 exp_id, fs_name, fs_cols, model_cfg, scaler_cfg, imb_cfg,
-                X_tr_raw, y_tr, X_te_raw, y_te, feat_idx, CV_FOLDS, seed, HAS_IMBLEARN
+                X_tr_raw, y_tr, X_te_raw, y_te, X_oot_raw, y_oot, feat_idx, CV_FOLDS, seed, HAS_IMBLEARN
             )
             for exp_id, fs_name, fs_cols, model_cfg, scaler_cfg, imb_cfg in tasks
         )
@@ -576,17 +622,31 @@ def run(
         for exp_id, fs_name, fs_cols, model_cfg, scaler_cfg, imb_cfg in tasks:
             res = _run_single_task(
                 exp_id, fs_name, fs_cols, model_cfg, scaler_cfg, imb_cfg,
-                X_tr_raw, y_tr, X_te_raw, y_te, feat_idx, CV_FOLDS, seed, HAS_IMBLEARN
+                X_tr_raw, y_tr, X_te_raw, y_te, X_oot_raw, y_oot, feat_idx, CV_FOLDS, seed, HAS_IMBLEARN
             )
             raw_results.append(res)
 
     all_results = list(raw_results)
 
-    # ── Sort and rank ──────────────────────────────────────────────────
-    log.info("Ranking all experiments...")
-    all_results.sort(key=lambda x: x["cv_roc_auc_mean"], reverse=True)
+    # ── Sort and rank with tie-breaker ────────────────────────────────
+    log.info("Ranking all experiments with contest tie-breaking rules...")
+    # Sort primarily by OOT ROC AUC descending, and secondary by n_features ascending
+    all_results.sort(key=lambda x: (-x["oot_roc_auc"], x["n_features"], x["experiment_id"]))
+    
+    # Apply 0.01 ROC AUC tie-breaking tolerance
+    n_res = len(all_results)
+    for i in range(n_res):
+        for j in range(i + 1, n_res):
+            diff = abs(all_results[i]["oot_roc_auc"] - all_results[j]["oot_roc_auc"])
+            if diff <= 0.01:
+                # If model j uses fewer features than model i, it wins the tie break
+                if all_results[j]["n_features"] < all_results[i]["n_features"]:
+                    all_results[i], all_results[j] = all_results[j], all_results[i]
+                    
+    # Assign ranks
     for i, r in enumerate(all_results):
         r["rank"] = i + 1
+
 
 
     # ── Top 3 per dimension ───────────────────────────────────────────
@@ -665,23 +725,23 @@ def run(
         {"label": "Best Feature Set",   "value": best["feature_set"]},
         {"label": "Best Scaler",        "value": best["scaler"]},
         {"label": "Best Imbalance",     "value": best["imbalance"]},
-        {"label": "Best CV AUC",        "value": str(best["cv_roc_auc_mean"]), "variant": "success"},
+        {"label": "Best OOT AUC",       "value": str(best["oot_roc_auc"]), "variant": "success"},
         {"label": "Best Test AUC",      "value": str(best["test_roc_auc"])},
-        {"label": "Best KS",            "value": str(best["test_ks"])},
+        {"label": "Best OOT KS",        "value": str(best["oot_ks"])},
     ]
     b.add_executive_summary(cards, narrative=(
         f"A total of <strong>{exp_count:,} experiments</strong> were executed across all combinations of "
         f"{len(feature_sets)} feature selection strategies, {len(model_configs)} model configurations, "
         f"scalers, and class imbalance handling techniques. "
-        f"Every experiment was evaluated using {CV_FOLDS}-fold stratified cross-validation on a "
-        f"{sample_n:,}-row training sample, and ranked by CV ROC AUC. "
+        f"Every experiment was trained on Train, validated on Test, and scored on OOT. "
+        f"Model rankings are computed on the OOT sample using a 0.01 ROC AUC tie-breaking tolerance (fewer features win ties).\n\n"
         f"The winning combination is "
         f"<strong>{best['model_label']}</strong> with feature set "
         f"<strong>{best['feature_set']}</strong>, scaled with "
         f"<strong>{best['scaler']}</strong> and imbalance strategy "
-        f"<strong>{best['imbalance']}</strong>, achieving a CV ROC AUC of "
-        f"<strong>{best['cv_roc_auc_mean']}</strong> "
-        f"(± {best['cv_roc_auc_std']})."
+        f"<strong>{best['imbalance']}</strong>, achieving an OOT ROC AUC of "
+        f"<strong>{best['oot_roc_auc']}</strong> "
+        f"(Test AUC of {best['test_roc_auc']}) using {best['n_features']} features."
     ))
 
     # ── Top 30 experiments table ───────────────────────────────────────
@@ -693,22 +753,21 @@ def run(
             "Model":       r["model_label"],
             "Scaler":      r["scaler"],
             "Imbalance":   r["imbalance"],
-            "CV AUC":      f'{r["cv_roc_auc_mean"]} ± {r["cv_roc_auc_std"]}',
+            "OOT AUC":     r["oot_roc_auc"],
             "Test AUC":    r["test_roc_auc"],
-            "PR AUC":      r["test_pr_auc"],
-            "F1":          r["test_f1"],
-            "Recall":      r["test_recall"],
-            "KS":          r["test_ks"],
-            "MCC":         r["test_mcc"],
-            "Brier":       r["test_brier"],
+            "CV AUC":      f'{r["cv_roc_auc_mean"]} ± {r["cv_roc_auc_std"]}',
+            "OOT KS":      r["oot_ks"],
+            "OOT F1":      r["oot_f1"],
+            "OOT Recall":  r["oot_recall"],
+            "N Features":  r["n_features"],
         })
     b.add_section(
         "Top 30 Experiment Combinations",
-        b.table(top30_rows, caption="Top 30 Ranked Experiments (by CV ROC AUC)",
+        b.table(top30_rows, caption="Top 30 Ranked Experiments (by OOT ROC AUC + Tie Breaker)",
                 interpretation=(
-                    "All experiments ranked by 3-fold CV ROC AUC. "
-                    "CV AUC is more reliable than test AUC for model selection as it "
-                    "uses all training data and avoids overfitting to the test split. "
+                    "All experiments ranked by OOT ROC AUC. "
+                    "If OOT ROC AUC values are within 0.01, the tie-breaking rule ranks "
+                    "the model with fewer features higher. "
                     "The full ranked table of all experiments is saved to "
                     "artifacts/experiment_results.csv."
                 )),
@@ -718,7 +777,7 @@ def run(
     # ── Top 3 per feature set ─────────────────────────────────────────
     fs_rows = []
     for fs_name, top3 in sorted(top3_per_fs.items(),
-                                 key=lambda x: x[1][0]["cv_roc_auc_mean"], reverse=True):
+                                 key=lambda x: x[1][0]["oot_roc_auc"], reverse=True):
         for pos, r in enumerate(top3, start=1):
             fs_rows.append({
                 "Feature Set":  fs_name,
@@ -727,15 +786,15 @@ def run(
                 "Model":        r["model_label"],
                 "Scaler":       r["scaler"],
                 "Imbalance":    r["imbalance"],
-                "CV AUC":       f'{r["cv_roc_auc_mean"]} ± {r["cv_roc_auc_std"]}',
+                "OOT AUC":      r["oot_roc_auc"],
                 "Test AUC":     r["test_roc_auc"],
-                "KS":           r["test_ks"],
-                "Recall":       r["test_recall"],
+                "OOT KS":       r["oot_ks"],
+                "OOT Recall":   r["oot_recall"],
                 "Overall Rank": r["rank"],
             })
     b.add_section(
         "Top 3 per Feature Selection Method",
-        b.table(fs_rows, caption="Top 3 Experiments for each Feature Set (ranked by CV ROC AUC)",
+        b.table(fs_rows, caption="Top 3 Experiments for each Feature Set (ranked by OOT ROC AUC)",
                 interpretation=(
                     "Shows the top 3 model configurations for each feature selection method. "
                     "Compare #1 across feature sets to find which selection method yields "
@@ -746,20 +805,20 @@ def run(
     )
 
     # Feature set bar chart — top 1 AUC per set
-    _fs_bar_data = [(fs, top3[0]["cv_roc_auc_mean"])
+    _fs_bar_data = [(fs, top3[0]["oot_roc_auc"])
                     for fs, top3 in sorted(top3_per_fs.items(),
-                                           key=lambda x: x[1][0]["cv_roc_auc_mean"], reverse=True)]
+                                           key=lambda x: x[1][0]["oot_roc_auc"], reverse=True)]
     fs_bar = model_metric_bar(
         [x[0] for x in _fs_bar_data],
         [x[1] for x in _fs_bar_data],
-        metric_name="Best CV ROC AUC",
-        title="Best AUC per Feature Selection Method",
+        metric_name="Best OOT ROC AUC",
+        title="Best OOT AUC per Feature Selection Method",
     )
     b.add_section(
         "Feature Selection Method Comparison Chart",
-        b.figure(fs_bar, "Feature Set AUC Comparison",
+        b.figure(fs_bar, "Feature Set OOT AUC Comparison",
                  interpretation=(
-                     "Each bar is the #1 AUC for that feature set (across all model configs). "
+                     "Each bar is the #1 OOT AUC for that feature set (across all model configs). "
                      "A large spread means feature selection method is a dominant factor. "
                      "A small spread means model choice dominates over selection method."
                  )),
@@ -769,7 +828,7 @@ def run(
     # ── Top 3 per model family ────────────────────────────────────────
     family_rows = []
     for fam, top3 in sorted(top3_per_family.items(),
-                             key=lambda x: x[1][0]["cv_roc_auc_mean"], reverse=True):
+                             key=lambda x: x[1][0]["oot_roc_auc"], reverse=True):
         for pos, r in enumerate(top3, start=1):
             family_rows.append({
                 "Model Family":  fam,
@@ -778,11 +837,11 @@ def run(
                 "Feature Set":   r["feature_set"],
                 "Scaler":        r["scaler"],
                 "Imbalance":     r["imbalance"],
-                "CV AUC":        f'{r["cv_roc_auc_mean"]} ± {r["cv_roc_auc_std"]}',
+                "OOT AUC":       r["oot_roc_auc"],
                 "Test AUC":      r["test_roc_auc"],
-                "KS":            r["test_ks"],
-                "Recall":        r["test_recall"],
-                "F1":            r["test_f1"],
+                "OOT KS":        r["oot_ks"],
+                "OOT Recall":    r["oot_recall"],
+                "OOT F1":        r["oot_f1"],
                 "Overall Rank":  r["rank"],
             })
     b.add_section(
@@ -797,20 +856,20 @@ def run(
     )
 
     # Model family bar — best AUC per family
-    _fam_bar_data = [(fam, top3[0]["cv_roc_auc_mean"])
+    _fam_bar_data = [(fam, top3[0]["oot_roc_auc"])
                      for fam, top3 in sorted(top3_per_family.items(),
-                                             key=lambda x: x[1][0]["cv_roc_auc_mean"], reverse=True)]
+                                             key=lambda x: x[1][0]["oot_roc_auc"], reverse=True)]
     family_bar = model_metric_bar(
         [x[0] for x in _fam_bar_data],
         [x[1] for x in _fam_bar_data],
-        metric_name="Best CV ROC AUC",
-        title="Best AUC per Model Family",
+        metric_name="Best OOT ROC AUC",
+        title="Best OOT AUC per Model Family",
     )
     b.add_section(
         "Model Family Comparison Chart",
-        b.figure(family_bar, "Model Family AUC Comparison",
+        b.figure(family_bar, "Model Family OOT AUC Comparison",
                  interpretation=(
-                     "Best achievable AUC per model family. "
+                     "Best achievable OOT AUC per model family. "
                      "Tree-based models typically outperform LR on non-linear credit risk patterns. "
                      "The LR ceiling represents maximum linear discriminability."
                  )),
@@ -820,7 +879,7 @@ def run(
     # ── Top 3 per scaler ──────────────────────────────────────────────
     scaler_rows = []
     for sc_name, top3 in sorted(top3_per_scaler.items(),
-                                 key=lambda x: x[1][0]["cv_roc_auc_mean"], reverse=True):
+                                 key=lambda x: x[1][0]["oot_roc_auc"], reverse=True):
         for pos, r in enumerate(top3, start=1):
             scaler_rows.append({
                 "Scaler":        sc_name,
@@ -828,10 +887,10 @@ def run(
                 "Model":         r["model_label"],
                 "Feature Set":   r["feature_set"],
                 "Imbalance":     r["imbalance"],
-                "CV AUC":        f'{r["cv_roc_auc_mean"]} ± {r["cv_roc_auc_std"]}',
+                "OOT AUC":       r["oot_roc_auc"],
                 "Test AUC":      r["test_roc_auc"],
-                "Recall":        r["test_recall"],
-                "Specificity":   r["test_specificity"],
+                "Recall":        r["oot_recall"],
+                "Specificity":   r["oot_specificity"],
                 "Overall Rank":  r["rank"],
             })
     b.add_section(
@@ -850,7 +909,7 @@ def run(
     # ── Top 3 per imbalance strategy ──────────────────────────────────
     imb_rows = []
     for imb_name, top3 in sorted(top3_per_imb.items(),
-                                  key=lambda x: x[1][0]["cv_roc_auc_mean"], reverse=True):
+                                  key=lambda x: x[1][0]["oot_roc_auc"], reverse=True):
         for pos, r in enumerate(top3, start=1):
             imb_rows.append({
                 "Imbalance Strategy": imb_name,
@@ -858,11 +917,11 @@ def run(
                 "Model":              r["model_label"],
                 "Feature Set":        r["feature_set"],
                 "Scaler":             r["scaler"],
-                "CV AUC":             f'{r["cv_roc_auc_mean"]} ± {r["cv_roc_auc_std"]}',
+                "OOT AUC":            r["oot_roc_auc"],
                 "Test AUC":           r["test_roc_auc"],
-                "Recall":             r["test_recall"],
-                "Specificity":        r["test_specificity"],
-                "KS":                 r["test_ks"],
+                "Recall":             r["oot_recall"],
+                "Specificity":        r["oot_specificity"],
+                "OOT KS":             r["oot_ks"],
                 "Overall Rank":       r["rank"],
             })
     b.add_section(
@@ -880,12 +939,12 @@ def run(
 
     # ── ROC curves for best per family ────────────────────────────────
     if roc_data:
-        roc_fig = roc_curves(roc_data, title="ROC Curves — Best per Model Family")
+        roc_fig = roc_curves(roc_data, title="ROC Curves — Best per Model Family (OOT)")
         b.add_section(
             "ROC Curves",
-            b.figure(roc_fig, "ROC Curves",
+            b.figure(roc_fig, "OOT ROC Curves",
                      interpretation=(
-                         "ROC curves for the best experiment from each model family. "
+                         "ROC curves for the best experiment from each model family evaluated on the OOT hold-out set. "
                          "Higher and more left-bulging curves indicate better separation "
                          "between defaulters and non-defaulters across all thresholds."
                      ),
@@ -907,27 +966,28 @@ def run(
             "Family":      r["model_family"],
             "Scaler":      r["scaler"],
             "Imbalance":   r["imbalance"],
+            "OOT AUC":     r["oot_roc_auc"],
+            "Test AUC":    r["test_roc_auc"],
             "CV AUC":      r["cv_roc_auc_mean"],
             "±":           r["cv_roc_auc_std"],
-            "Test AUC":    r["test_roc_auc"],
-            "KS":          r["test_ks"],
-            "F1":          r["test_f1"],
-            "Recall":      r["test_recall"],
-            "Brier":       r["test_brier"],
+            "OOT KS":      r["oot_ks"],
+            "OOT F1":      r["oot_f1"],
+            "OOT Recall":  r["oot_recall"],
+            "N Features":  r["n_features"],
             "Error":       r["error"] or "",
         })
 
     b.add_section(
         "Complete Ranked Results — All Experiments",
         b.callout(
-            f"The full table below shows ALL {exp_count:,} experiments ranked by CV ROC AUC. "
+            f"The full table below shows ALL {exp_count:,} experiments ranked by OOT ROC AUC. "
             f"Every combination of feature set, model, scaler, and imbalance strategy is included. "
             f"A machine-readable copy is saved to <code>artifacts/experiment_results.csv</code>.",
             kind="note",
         )
         + b.table(
             all_rows,
-            caption=f"All {exp_count} Experiments — Ranked by CV ROC AUC",
+            caption=f"All {exp_count} Experiments — Ranked by OOT ROC AUC + Tie Breaker",
             interpretation=(
                 "This is the complete combinatorial ranking. "
                 "Each row is a unique pipeline configuration. "
@@ -946,7 +1006,7 @@ def run(
 
     elapsed = time.perf_counter() - t0_stage
     log.stage_end("07 — Full Combinatorial Experiment Grid", elapsed)
-    log.info(f"Total experiments: {exp_count} | Best CV AUC: {best['cv_roc_auc_mean']}")
+    log.info(f"Total experiments: {exp_count} | Best OOT AUC: {best['oot_roc_auc']} using {best['n_features']} features")
     log.info(f"Best combo: {best['feature_set']} | {best['model_label']} | "
              f"{best['scaler']} | {best['imbalance']}")
 
@@ -961,3 +1021,4 @@ def run(
         "y_te":         y_te,
         "all_results":  all_results,
     }
+

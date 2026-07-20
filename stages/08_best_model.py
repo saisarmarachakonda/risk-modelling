@@ -44,14 +44,13 @@ def run(
     # Build metrics dict from best_exp (combinatorial) or old results
     if best_exp:
         m = {
-            "roc_auc":       best_exp.get("test_roc_auc",     "N/A"),
-            "pr_auc":        best_exp.get("test_pr_auc",      "N/A"),
-            "f1":            best_exp.get("test_f1",          "N/A"),
-            "recall":        best_exp.get("test_recall",      "N/A"),
-            "specificity":   best_exp.get("test_specificity", "N/A"),
-            "ks":            best_exp.get("test_ks",          "N/A"),
-            "mcc":           best_exp.get("test_mcc",         "N/A"),
-            "brier":         best_exp.get("test_brier",       "N/A"),
+            "roc_auc":       best_exp.get("oot_roc_auc",      "N/A"),
+            "pr_auc":        best_exp.get("oot_pr_auc",       "N/A"),
+            "f1":            best_exp.get("oot_f1",           "N/A"),
+            "recall":        best_exp.get("oot_recall",       "N/A"),
+            "specificity":   best_exp.get("oot_specificity",  "N/A"),
+            "ks":            best_exp.get("oot_ks",           "N/A"),
+            "test_roc_auc":  best_exp.get("test_roc_auc",     "N/A"),
             "cv_roc_auc_mean": best_exp.get("cv_roc_auc_mean","N/A"),
             "cv_roc_auc_std":  best_exp.get("cv_roc_auc_std", "N/A"),
             "train_time_s":  best_exp.get("train_time_s",    "N/A"),
@@ -74,14 +73,14 @@ def run(
     )
 
     cards = [
-        {"label": "Best Model",    "value": best_name,                       "variant": "success"},
-        {"label": "ROC AUC",       "value": str(m.get("roc_auc",  "N/A")),   "variant": "success"},
-        {"label": "PR AUC",        "value": str(m.get("pr_auc",   "N/A"))},
-        {"label": "F1 Score",      "value": str(m.get("f1",       "N/A"))},
-        {"label": "Recall",        "value": str(m.get("recall",   "N/A")),   "variant": "warning"},
-        {"label": "Specificity",   "value": str(m.get("specificity","N/A"))},
-        {"label": "KS Statistic",  "value": str(m.get("ks",       "N/A"))},
-        {"label": "Brier Score",   "value": str(m.get("brier",    "N/A"))},
+        {"label": "Best Model",         "value": best_name,                       "variant": "success"},
+        {"label": "OOT ROC AUC",        "value": str(m.get("roc_auc",  "N/A")),   "variant": "success"},
+        {"label": "Test ROC AUC",       "value": str(m.get("test_roc_auc", "N/A"))},
+        {"label": "OOT PR AUC",         "value": str(m.get("pr_auc",   "N/A"))},
+        {"label": "OOT F1 Score",       "value": str(m.get("f1",       "N/A"))},
+        {"label": "OOT Recall",         "value": str(m.get("recall",   "N/A")),   "variant": "warning"},
+        {"label": "OOT Specificity",    "value": str(m.get("specificity","N/A"))},
+        {"label": "OOT KS Statistic",   "value": str(m.get("ks",       "N/A"))},
     ]
     # group already set above based on best_exp or results
 

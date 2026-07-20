@@ -5,15 +5,26 @@ project:
   description: "End-to-end binary classification pipeline for credit risk modelling"
 
 data:
-  input_path: "data/sample_credit_risk.csv"
-  input_format: "csv"               # csv | parquet | duckdb
-  target_column: "default_flag"
-  id_columns: []
-  date_columns: []
+  input_path: "data/performance.csv"
+  input_format: "csv"
+  target_column: "funded"
+  id_column: "record_id"
+  group_column: "sample_group"
+  feature_files:
+    - "data/features_premiers.csv"
+    - "data/features_trended.csv"
+    - "data/features_ccr.csv"
+    - "data/features_cia.csv"
+    - "data/features_cfa.csv"
+  prohibited_patterns:
+    - ".*score.*"
+    - ".*reason_code.*"
+    - ".*reason.*"
   separator: ","
   encoding: "utf-8"
-  sample_size_for_viz: 50000        # rows used for matplotlib figures
-  sample_size_for_eda: 100000       # rows used for EDA statistics
+  sample_size_for_viz: 50000
+  sample_size_for_eda: 100000
+
 
 domain:
   name: "Credit Risk"

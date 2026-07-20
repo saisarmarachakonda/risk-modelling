@@ -38,9 +38,9 @@ def run(
 
     if best_exp:
         best_m = {
-            "roc_auc": best_exp.get("test_roc_auc", "N/A"),
-            "ks": best_exp.get("test_ks", "N/A"),
-            "f1": best_exp.get("test_f1", "N/A"),
+            "roc_auc": best_exp.get("oot_roc_auc", "N/A"),
+            "ks": best_exp.get("oot_ks", "N/A"),
+            "f1": best_exp.get("oot_f1", "N/A"),
         }
     else:
         best_r = results.get(best_name, {})
@@ -62,8 +62,8 @@ def run(
 
     cards = [
         {"label": "Best Model",        "value": best_name or "N/A",           "variant": "success"},
-        {"label": "ROC AUC",           "value": str(best_m.get("roc_auc","N/A")), "variant": "success"},
-        {"label": "KS Statistic",      "value": str(best_m.get("ks","N/A"))},
+        {"label": "OOT ROC AUC",       "value": str(best_m.get("roc_auc","N/A")), "variant": "success"},
+        {"label": "OOT KS Statistic",  "value": str(best_m.get("ks","N/A"))},
         {"label": "Dataset Size",      "value": f"{n_rows:,}", "sub": "records"},
         {"label": "Features (raw)",    "value": f'{schema_sum["total_columns"]:,}'},
         {"label": "Features (selected)","value": f'{len(selected_features):,}'},
@@ -77,12 +77,12 @@ def run(
         f"applied to a {n_rows:,}-row, {schema_sum['total_columns']:,}-column {domain.get('name', 'credit risk')} dataset.\n\n"
         f"After comprehensive data quality assessment, exploratory analysis, feature engineering, "
         f"and multi-method feature selection ({len(selected_features):,} features retained from "
-        f"{schema_sum['total_columns']:,}), {len(results)} candidate models were trained and evaluated.\n\n"
-        f"The winning model is <strong>{best_name}</strong> with a test ROC AUC of "
-        f"<strong>{best_m.get('roc_auc','N/A')}</strong> and a KS statistic of "
+        f"{schema_sum['total_columns']:,}), the pipeline executed a full combinatorial grid search of model architectures.\n\n"
+        f"The winning model is <strong>{best_name}</strong> with a final Out-of-Time (OOT) holdout ROC AUC of "
+        f"<strong>{best_m.get('roc_auc','N/A')}</strong> and an OOT KS statistic of "
         f"<strong>{best_m.get('ks','N/A')}</strong>. The model is assessed as "
         f"{'ready for production deployment' if ((isinstance(best_m.get('roc_auc'), (int, float)) and best_m.get('roc_auc', 0) > 0.65) or (isinstance(best_m.get('roc_auc'), str) and best_m.get('roc_auc') != 'N/A' and float(best_m.get('roc_auc')) > 0.65)) else 'requiring further development'} "
-        f"subject to standard model validation procedures."
+        f"subject to final verification."
     ))
 
     # Pipeline summary

@@ -60,18 +60,77 @@ class DataLoader:
 
     def _register(self):
         p = str(self.input_path)
-        if self.input_format == "parquet":
+        null_str = ", ".join(f"'{n}'" for n in self._nulls)
+        
+        # Load performance file
+        self._con.execute(
+            f"CREATE OR REPLACE TABLE perf_raw AS "
+            f"SELECT * FROM read_csv_auto('{p}', sep='{self._sep}', nullstr=[{null_str}], header=true)"
+        )
+        
+        # Load and join each feature file
+        feat_files = self.config.get("data", {}).get("feature_files", [])
+        id_col = self.config.get("data", {}).get("id_column", "record_id")
+        
+        for idx, fpath in enumerate(feat_files):
+            tbl_alias = f"feat_{idx}"
             self._con.execute(
-                f"CREATE OR REPLACE VIEW {self._table} AS SELECT * FROM read_parquet('{p}')"
+                f"CREATE OR REPLACE TABLE {tbl_alias} AS "
+                f"SELECT * FROM read_csv_auto('{fpath}', sep='{self._sep}', nullstr=[{null_str}], header=true)"
             )
-        else:
-            null_str = ", ".join(f"'{n}'" for n in self._nulls)
-            self._con.execute(
-                f"CREATE OR REPLACE VIEW {self._table} AS "
-                f"SELECT * FROM read_csv_auto('{p}', "
-                f"sep='{self._sep}', nullstr=[{null_str}], "
-                f"header=true, ignore_errors=true)"
-            )
+            
+        # Join query builder
+        join_query = "FROM perf_raw p"
+        select_fields = ["p.*"]
+        for idx in range(len(feat_files)):
+            tbl_alias = f"feat_{idx}"
+            join_query += f" LEFT JOIN {tbl_alias} f{idx} ON p.{id_col} = f{idx}.{id_col}"
+            # Select all columns from this feature file except the join key
+            # To get column names, we query information_schema in DuckDB
+            cols_res = self._con.execute(
+                f"SELECT column_name FROM information_schema.columns "
+                f"WHERE table_name='{tbl_alias}' AND column_name != '{id_col}'"
+            ).fetchall()
+            for row in cols_res:
+                c_name = row[0]
+                select_fields.append(f"f{idx}.\"{c_name}\" AS \"{c_name}\"")
+                
+        # Create intermediate combined table
+        combined_sql = f"CREATE OR REPLACE TABLE combined_raw AS SELECT {', '.join(select_fields)} {join_query}"
+        self._con.execute(combined_sql)
+        
+        # Filter out prohibited columns
+        all_cols_res = self._con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='combined_raw'"
+        ).fetchall()
+        
+        import re
+        prohibited_patterns = self.config.get("data", {}).get("prohibited_patterns", [])
+        patterns = [re.compile(p, re.IGNORECASE) for p in prohibited_patterns]
+        
+        safe_selects = []
+        dropped_prohibited = []
+        for row in all_cols_res:
+            c = row[0]
+            is_prohibited = False
+            for pat in patterns:
+                if pat.search(c):
+                    is_prohibited = True
+                    break
+            if is_prohibited:
+                dropped_prohibited.append(c)
+            else:
+                safe_selects.append(f"\"{c}\"")
+                
+        if dropped_prohibited:
+            print(f"\n[WARNING] Disqualification Guard: Dropped {len(dropped_prohibited)} prohibited columns matching patterns:")
+            print(f"  {', '.join(dropped_prohibited)}")
+            
+        # Create final view
+        self._con.execute(
+            f"CREATE OR REPLACE VIEW {self._table} AS SELECT {', '.join(safe_selects)} FROM combined_raw"
+        )
+
 
     # ── Schema ────────────────────────────────────────────────────────
 

@@ -38,44 +38,52 @@ def run(
     log = get_logger("06_ModelPrep", config.get("paths", {}).get("logs_dir", "logs"))
     log.stage_start("06 — Model Preparation")
     t0 = time.perf_counter()
-
-    n_rows   = loader.count_rows()
     mod_cfg  = config.get("modeling", {})
     seed     = mod_cfg.get("random_seed", 42)
-    test_sz  = mod_cfg.get("test_size", 0.2)
-    val_sz   = mod_cfg.get("validation_size", 0.1)
     cv_folds = mod_cfg.get("cv_folds", 5)
-    target   = loader.target_col
     balance  = mod_cfg.get("class_balance_method", "none")
 
-    # Compute split sizes
-    n_test  = int(n_rows * test_sz)
-    n_val   = int(n_rows * val_sz)
-    n_train = n_rows - n_test - n_val
+    # Read sample group distribution from DuckDB
+    grp_col = config.get("data", {}).get("group_column", "sample_group")
+    tgt_col = config.get("data", {}).get("target_column", "funded")
+    
+    group_stats = loader._con.execute(
+        f"SELECT {grp_col}, COUNT(*), SUM(CAST({tgt_col} AS INTEGER)) "
+        f"FROM input_data GROUP BY {grp_col}"
+    ).fetchall()
+    
+    n_train = n_test = n_oot = 0
+    pos_tr = pos_te = pos_oot = 0
+    neg_tr = neg_te = neg_oot = 0
+    
+    for row in group_stats:
+        grp, cnt, pos = row[0], int(row[1]), int(row[2])
+        neg = cnt - pos
+        if grp == "Train":
+            n_train, pos_tr, neg_tr = cnt, pos, neg
+        elif grp == "Test":
+            n_test, pos_te, neg_te = cnt, pos, neg
+        elif grp == "OOT":
+            n_oot, pos_oot, neg_oot = cnt, pos, neg
 
-    # Target distribution
-    tgt_dist = loader.get_target_distribution().to_dicts()
-    pos_count = neg_count = 0
-    for r in tgt_dist:
-        if str(r["target_value"]) in ("1", "1.0"):
-            pos_count = int(r["count"])
-        else:
-            neg_count = int(r["count"])
-    imbalance_ratio = neg_count / max(pos_count, 1)
+    n_rows = n_train + n_test + n_oot
+    pos_count = pos_tr + pos_te + pos_oot
+    neg_count = neg_tr + neg_te + neg_oot
+    imbalance_ratio = neg_tr / max(pos_tr, 1)
 
     b = HTMLReportBuilder(
         report_title   = "Model Preparation Report",
         stage_number   = 6,
-        stage_subtitle = "Train/test split, CV strategy, class balancing, pipeline architecture",
+        stage_subtitle = "Contest Train/Test/OOT partitioning and CV strategy",
         config         = config,
         n_rows         = n_rows,
         n_cols         = len(selected_features),
     )
 
     cards = [
-        {"label": "Training Rows",    "value": f"{n_train:,}", "sub": f"({100*(1-test_sz-val_sz):.0f}%)"},
-        {"label": "Validation Rows",  "value": f"{n_val:,}",   "sub": f"({val_sz*100:.0f}%)"},
-        {"label": "Test Rows",         "value": f"{n_test:,}",  "sub": f"({test_sz*100:.0f}%)"},
+        {"label": "Training Rows",    "value": f"{n_train:,}", "sub": f"({n_train/n_rows*100:.1f}%)"},
+        {"label": "Test Rows (Val)",  "value": f"{n_test:,}",  "sub": f"({n_test/n_rows*100:.1f}%)"},
+        {"label": "OOT Rows (Hold)",  "value": f"{n_oot:,}",   "sub": f"({n_oot/n_rows*100:.1f}%)"},
         {"label": "CV Folds",          "value": str(cv_folds),  "sub": "stratified k-fold"},
         {"label": "Selected Features", "value": f"{len(selected_features):,}"},
         {"label": "Random Seed",       "value": str(seed)},
@@ -84,57 +92,53 @@ def run(
         {"label": "Balance Method",    "value": balance.upper() if balance != "none" else "None"},
     ]
     b.add_executive_summary(cards, narrative=(
-        f"Model preparation configures the experimental framework for training and evaluating "
-        f"{len(mod_cfg.get('models_to_train', []))} candidate models. "
-        f"The dataset ({n_rows:,} rows) is split into training ({n_train:,}), "
-        f"validation ({n_val:,}), and test ({n_test:,}) sets using stratified sampling "
-        f"to maintain class proportions across all splits. "
-        f"A {cv_folds}-fold stratified cross-validation is used for hyperparameter-independent "
-        f"performance estimation. The test set is held out until final model evaluation "
-        f"and is NEVER used during training or model selection."
+        f"Model preparation configures the experimental framework for the Machine Learning Contest. "
+        f"The dataset is pre-partitioned into Training ({n_train:,} rows), Test ({n_test:,} rows), "
+        f"and Out-of-Time (OOT, {n_oot:,} rows) groups. "
+        f"Models are trained strictly on the Train set, tuned on the Test set, "
+        f"and evaluated on the OOT set for final validation. "
+        f"A {cv_folds}-fold stratified cross-validation on the Train set is used for robust local validation."
     ))
 
     # Split strategy
     split_content = (
         b.p(
-            f"Data splitting uses stratified random sampling with seed={seed} for reproducibility. "
-            f"Stratification ensures that the {imbalance_ratio:.1f}:1 class imbalance ratio is "
-            f"preserved identically in each split."
+            "Data partitioning is predefined in the competition source dataset to guarantee "
+            "temporal validation using the Out-of-Time (OOT) hold-out."
         )
         + b.table(
             [
-                {"Split":     "Training",   "Rows": f"{n_train:,}",
-                 "Pct": f"{(1-test_sz-val_sz)*100:.0f}%",
-                 "Positive":  f"{int(pos_count*(1-test_sz-val_sz)):,}",
-                 "Negative":  f"{int(neg_count*(1-test_sz-val_sz)):,}",
-                 "Purpose":   "Model parameter fitting"},
-                {"Split":     "Validation", "Rows": f"{n_val:,}",
-                 "Pct": f"{val_sz*100:.0f}%",
-                 "Positive":  f"{int(pos_count*val_sz):,}",
-                 "Negative":  f"{int(neg_count*val_sz):,}",
-                 "Purpose":   "Early stopping & hyperparameter tuning"},
-                {"Split":     "Test",       "Rows": f"{n_test:,}",
-                 "Pct": f"{test_sz*100:.0f}%",
-                 "Positive":  f"{int(pos_count*test_sz):,}",
-                 "Negative":  f"{int(neg_count*test_sz):,}",
-                 "Purpose":   "Final unbiased performance evaluation"},
+                {"Split": "Train", "Rows": f"{n_train:,}",
+                 "Pct": f"{n_train/n_rows*100:.1f}%",
+                 "Positive (funded=1)": f"{pos_tr:,}",
+                 "Negative (funded=0)": f"{neg_tr:,}",
+                 "Purpose": "Model parameter fitting & local training"},
+                {"Split": "Test", "Rows": f"{n_test:,}",
+                 "Pct": f"{n_test/n_rows*100:.1f}%",
+                 "Positive (funded=1)": f"{pos_te:,}",
+                 "Negative (funded=0)": f"{neg_te:,}",
+                 "Purpose": "Model selection, tuning, and local validation"},
+                {"Split": "OOT (Holdout)", "Rows": f"{n_oot:,}",
+                 "Pct": f"{n_oot/n_rows*100:.1f}%",
+                 "Positive (funded=1)": f"{pos_oot:,}",
+                 "Negative (funded=0)": f"{neg_oot:,}",
+                 "Purpose": "Final scoring by contest organizer (strictly hold-out)"},
             ],
-            caption="Train/Validation/Test Split",
+            caption="Pre-defined Competition Group Partitioning",
             interpretation=(
-                "The test set is strictly held out and never used for model selection. "
-                "Validation is used for early stopping in LightGBM/XGBoost and as a "
-                "criterion for selecting the best hyperparameter configuration."
+                "The OOT set is strictly held out and never used for model parameter fitting or selection. "
+                "The Test set is used to evaluate candidate models and select the best submission."
             ),
         )
         + b.callout(
-            f"<strong>Leakage Prevention:</strong> All preprocessing parameters "
-            f"(medians, StandardScaler statistics, WoE mappings) are computed ONLY on the "
-            f"training set and then applied to validation and test sets. "
-            f"Feature selection was performed using cross-validation on training data only.",
+            "<strong>Leakage Prevention:</strong> All preprocessing parameters (medians, OHE dummies, etc.) "
+            "are computed ONLY on the Train set and applied unchanged to the Test and OOT sets. "
+            "This ensures zero information from Test or OOT leaks into training.",
             kind="insight",
         )
     )
     b.add_section("Train/Validation/Test Split", split_content, icon="✂️")
+
 
     # CV strategy
     cv_content = (
@@ -210,8 +214,8 @@ def run(
 
     prep_info = {
         "n_train": n_train,
-        "n_val": n_val,
-        "n_test": n_test,
+        "n_val": n_test,
+        "n_test": n_oot,
         "n_features": len(selected_features),
         "seed": seed,
         "cv_folds": cv_folds,
