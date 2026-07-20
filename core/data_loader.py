@@ -62,20 +62,20 @@ class DataLoader:
         p = str(self.input_path)
         null_str = ", ".join(f"'{n}'" for n in self._nulls)
         
-        # Load performance file
+        # Load performance file as VIEW
         self._con.execute(
-            f"CREATE OR REPLACE TABLE perf_raw AS "
+            f"CREATE OR REPLACE VIEW perf_raw AS "
             f"SELECT * FROM read_csv_auto('{p}', sep='{self._sep}', nullstr=[{null_str}], header=true)"
         )
         
-        # Load and join each feature file
+        # Load and join each feature file as VIEW
         feat_files = self.config.get("data", {}).get("feature_files", [])
         id_col = self.config.get("data", {}).get("id_column", "record_id")
         
         for idx, fpath in enumerate(feat_files):
             tbl_alias = f"feat_{idx}"
             self._con.execute(
-                f"CREATE OR REPLACE TABLE {tbl_alias} AS "
+                f"CREATE OR REPLACE VIEW {tbl_alias} AS "
                 f"SELECT * FROM read_csv_auto('{fpath}', sep='{self._sep}', nullstr=[{null_str}], header=true)"
             )
             
@@ -95,8 +95,8 @@ class DataLoader:
                 c_name = row[0]
                 select_fields.append(f"f{idx}.\"{c_name}\" AS \"{c_name}\"")
                 
-        # Create intermediate combined table
-        combined_sql = f"CREATE OR REPLACE TABLE combined_raw AS SELECT {', '.join(select_fields)} {join_query}"
+        # Create intermediate combined view
+        combined_sql = f"CREATE OR REPLACE VIEW combined_raw AS SELECT {', '.join(select_fields)} {join_query}"
         self._con.execute(combined_sql)
         
         # Filter out prohibited columns
