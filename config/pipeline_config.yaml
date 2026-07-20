@@ -1,0 +1,79 @@
+project:
+  name: "Risk Modelling Pipeline"
+  author: "Risk Analytics Team"
+  version: "1.0.0"
+  description: "End-to-end binary classification pipeline for credit risk modelling"
+
+data:
+  input_path: "data/sample_credit_risk.csv"
+  input_format: "csv"               # csv | parquet | duckdb
+  target_column: "default_flag"
+  id_columns: []
+  date_columns: []
+  separator: ","
+  encoding: "utf-8"
+  sample_size_for_viz: 50000        # rows used for matplotlib figures
+  sample_size_for_eda: 100000       # rows used for EDA statistics
+
+domain:
+  name: "Credit Risk"
+  entity: "borrower"
+  problem_type: "binary_classification"
+  positive_class_label: "Default"
+  negative_class_label: "Non-Default"
+  positive_class_value: 1
+  negative_class_value: 0
+
+memory:
+  chunk_size: 100000
+  max_memory_gb: 8
+  duckdb_threads: 4
+  duckdb_memory_limit: "6GB"
+
+preprocessing:
+  numeric_imputation: "median"      # mean | median | constant
+  categorical_imputation: "mode"    # mode | constant | unknown
+  imputation_constant: -999
+  max_cardinality_for_encoding: 50
+  rare_category_threshold: 0.01     # categories < 1% of data merged to "OTHER"
+  outlier_method: "iqr"             # iqr | zscore | none
+  outlier_threshold: 3.0
+  apply_log_transform: false
+  apply_standard_scaling: true
+
+feature_selection:
+  methods:
+    - variance
+    - correlation
+    - iv
+    - random_forest_importance
+  correlation_threshold: 0.95       # drop one of a pair with corr > threshold
+  variance_threshold: 0.01
+  iv_threshold: 0.02                # Information Value: <0.02 = useless
+  top_n_features: 200
+
+modeling:
+  test_size: 0.2
+  validation_size: 0.1
+  cv_folds: 5
+  random_seed: 42
+  class_balance_method: "none"      # none | smote | oversample | undersample | class_weight
+  models_to_train:
+    - logistic_regression
+    - random_forest
+    - gradient_boosting
+    - lightgbm
+    - xgboost
+  primary_metric: "roc_auc"         # roc_auc | f1 | precision | recall | accuracy
+
+reporting:
+  output_dir: "reports"
+  figure_dpi: 150
+  figure_format: "png"
+  max_features_in_plot: 30
+  color_palette: "professional"
+
+paths:
+  logs_dir: "logs"
+  models_dir: "models"
+  artifacts_dir: "artifacts"
