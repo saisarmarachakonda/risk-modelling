@@ -77,7 +77,11 @@ def run_pipeline(
     if selected_features_path.exists():
         try:
             with open(selected_features_path, "r") as f:
-                selected_features = json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict):
+                    selected_features = data.get("selected_features", [])
+                else:
+                    selected_features = data
         except Exception:
             pass
 

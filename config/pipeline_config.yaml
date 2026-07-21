@@ -69,6 +69,7 @@ modeling:
   cv_folds: 5
   random_seed: 42
   class_balance_method: "none"      # none | smote | oversample | undersample | class_weight
+  use_selected_features_only: true  # train models on pre-selected features first
   models_to_train:
     - logistic_regression
     - random_forest

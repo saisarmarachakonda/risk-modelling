@@ -587,8 +587,38 @@ def run(
 
 
     # ── Build feature sets ─────────────────────────────────────────────
-    log.info("Building feature sets (7 methods)…")
-    feature_sets = _make_feature_sets(X_tr_raw, y_tr, feat_cols, seed, imb_ratio)
+    use_selected_only = mod_cfg.get("use_selected_features_only", False)
+    if use_selected_only:
+        log.info("use_selected_features_only is TRUE. Loading pre-selected features from Stage 05…")
+        sel_features_file = artifacts_dir / "selected_features.json"
+        if sel_features_file.exists():
+            try:
+                with open(sel_features_file, "r") as f:
+                    sel_data = json.load(f)
+                
+                fs_sel = sel_data.get("selected_features", [])
+                fs_both = sel_data.get("both_consensus", [])
+                fs_tree = sel_data.get("tree_only", [])
+                fs_lr = sel_data.get("lr_only", [])
+
+                feature_sets = {}
+                feature_sets["Stage5_Selected"] = [c for c in fs_sel if c in feat_cols]
+                if fs_both:
+                    feature_sets["Stage5_BothConsensus"] = [c for c in fs_both if c in feat_cols]
+                if fs_tree:
+                    feature_sets["Stage5_TreeOnly"] = [c for c in fs_tree if c in feat_cols]
+                if fs_lr:
+                    feature_sets["Stage5_LROnly"] = [c for c in fs_lr if c in feat_cols]
+            except Exception as e:
+                log.warning(f"Error loading selected_features.json: {e}. Falling back to default feature sets.")
+                feature_sets = _make_feature_sets(X_tr_raw, y_tr, feat_cols, seed, imb_ratio)
+        else:
+            log.warning("selected_features.json not found in artifacts. Falling back to default feature sets.")
+            feature_sets = _make_feature_sets(X_tr_raw, y_tr, feat_cols, seed, imb_ratio)
+    else:
+        log.info("Building feature sets (7 methods)…")
+        feature_sets = _make_feature_sets(X_tr_raw, y_tr, feat_cols, seed, imb_ratio)
+
     for fs_name, fs_cols in feature_sets.items():
         log.info(f"  {fs_name}: {len(fs_cols)} features")
 
