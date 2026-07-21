@@ -191,7 +191,7 @@ def _make_models(seed: int, imbalance_ratio: float) -> List[Dict]:
         "family": "Random Forest",
         "model": RandomForestClassifier(n_estimators=60, max_depth=6,
                                          max_features="sqrt", min_samples_leaf=20,
-                                         n_jobs=-1, random_state=seed,
+                                         n_jobs=1, random_state=seed,
                                          max_samples=0.7),
         "needs_scale": False,
     })
@@ -202,7 +202,7 @@ def _make_models(seed: int, imbalance_ratio: float) -> List[Dict]:
         "label": "Extra Trees n=60 depth=8",
         "family": "Extra Trees",
         "model": ExtraTreesClassifier(n_estimators=60, max_depth=8, min_samples_leaf=20,
-                                       n_jobs=-1, random_state=seed),
+                                       n_jobs=1, random_state=seed),
         "needs_scale": False,
     })
 
@@ -229,8 +229,24 @@ def _make_models(seed: int, imbalance_ratio: float) -> List[Dict]:
                                         colsample_bytree=0.8, min_child_weight=20,
                                         scale_pos_weight=scale_pos,
                                         eval_metric="auc", verbosity=0,
-                                        random_state=seed, n_jobs=-1,
+                                        random_state=seed, n_jobs=1,
                                         use_label_encoder=False),
+            "needs_scale": False,
+        })
+    except ImportError:
+        pass
+
+    # -- LightGBM --
+    try:
+        import lightgbm as lgb
+        configs.append({
+            "id": "LGB_lr0.1_d4",
+            "label": "LightGBM n=80 depth=4",
+            "family": "LightGBM",
+            "model": lgb.LGBMClassifier(n_estimators=80, learning_rate=0.1,
+                                        max_depth=4, num_leaves=15, subsample=0.8,
+                                        colsample_bytree=0.8, scale_pos_weight=scale_pos,
+                                        random_state=seed, n_jobs=1, verbose=-1),
             "needs_scale": False,
         })
     except ImportError:
