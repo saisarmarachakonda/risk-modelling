@@ -172,14 +172,22 @@ class DataLoader:
 
     def get_columns(self) -> List[str]:
         if self._cols is None:
-            res = self._con.execute(
-                f"SELECT column_name FROM information_schema.columns "
-                f"WHERE table_name='{self._table}' ORDER BY ordinal_position"
-            ).fetchall()
-            self._cols = [r[0] for r in res]
+            if self.execution_mode == "spark" and self._spark is not None:
+                self._cols = self._spark.table(self._table).columns
+            else:
+                res = self._con.execute(
+                    f"SELECT column_name FROM information_schema.columns "
+                    f"WHERE table_name='{self._table}' ORDER BY ordinal_position"
+                ).fetchall()
+                self._cols = [r[0] for r in res]
         return self._cols
 
     def get_db_types(self) -> Dict[str, str]:
+        if self.execution_mode == "spark" and self._spark is not None:
+            return {
+                field.name: str(field.dataType).replace("Type", "").upper()
+                for field in self._spark.table(self._table).schema.fields
+            }
         res = self._con.execute(
             f"SELECT column_name, data_type FROM information_schema.columns "
             f"WHERE table_name='{self._table}'"
@@ -189,6 +197,8 @@ class DataLoader:
     # ── Row operations ────────────────────────────────────────────────
 
     def count_rows(self) -> int:
+        if self.execution_mode == "spark" and self._spark is not None:
+            return self._spark.table(self._table).count()
         return int(self._con.execute(
             f"SELECT COUNT(*) FROM {self._table}"
         ).fetchone()[0])
@@ -203,6 +213,12 @@ class DataLoader:
 
     def sample(self, n: int, seed: int = 42) -> pl.DataFrame:
         """Return an n-row random sample as a Polars DataFrame (all columns)."""
+        if self.execution_mode == "spark" and self._spark is not None:
+            n_rows = self.count_rows()
+            frac = min(1.0, n / max(n_rows, 1))
+            sdf = self._spark.table(self._table).sample(withReplacement=False, fraction=frac, seed=seed)
+            import pandas as pd
+            return pl.from_pandas(sdf.limit(n).toPandas())
         n_rows = self.count_rows()
         frac   = min(1.0, n / max(n_rows, 1))
         q      = f"SELECT * FROM {self._table} USING SAMPLE {frac*100:.4f}% (bernoulli, {seed})"
@@ -217,6 +233,13 @@ class DataLoader:
         """Return an n-row sample of specific columns."""
         if not cols:
             return pl.DataFrame()
+        if self.execution_mode == "spark" and self._spark is not None:
+            n_rows = self.count_rows()
+            frac = min(1.0, n / max(n_rows, 1))
+            escaped_cols = [f"`{c}`" for c in cols]
+            sdf = self._spark.table(self._table).select(escaped_cols).sample(withReplacement=False, fraction=frac, seed=seed)
+            import pandas as pd
+            return pl.from_pandas(sdf.limit(n).toPandas())
         n_rows  = self.count_rows()
         frac    = min(1.0, n / max(n_rows, 1))
         col_sql = ", ".join(f'"{c}"' for c in cols)
@@ -229,33 +252,42 @@ class DataLoader:
     # ── Aggregate statistics ──────────────────────────────────────────
 
     def get_numeric_stats(self, cols: List[str]) -> pl.DataFrame:
-        """Compute descriptive stats for numeric columns via DuckDB SQL."""
+        """Compute descriptive stats for numeric columns via Spark or DuckDB SQL."""
         if not cols:
             return pl.DataFrame()
 
-        parts = []
-        for batch in _batched(cols, _BATCH_COLS):
-            aggs = []
-            for c in batch:
-                qc = f'"{c}"'
-                aggs += [
-                    f"'{c}' AS column",
-                    f"COUNT({qc})              AS n",
-                    f"COUNT(*) - COUNT({qc})   AS n_missing",
-                    f"AVG({qc})                AS mean",
-                    f"STDDEV_POP({qc})         AS std",
-                    f"MIN({qc})                AS min",
-                    f"PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY {qc}) AS q1",
-                    f"PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY {qc}) AS median",
-                    f"PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY {qc}) AS q3",
-                    f"MAX({qc})                AS max",
-                ]
-                sub = (
-                    f"SELECT {', '.join(aggs)} FROM {self._table}"
-                )
-                parts.append(sub)
+        if self.execution_mode == "spark" and self._spark is not None:
+            escaped_cols = [f"`{c}`" for c in cols]
+            sdf = self._spark.table(self._table).select(escaped_cols)
+            summary_df = sdf.summary("count", "mean", "stddev", "min", "25%", "50%", "75%", "max").toPandas()
+            rows = []
+            n_total = self.count_rows()
+            for c in cols:
+                try:
+                    cnt = float(summary_df.loc[summary_df["summary"] == "count", c].values[0])
+                    mean_val = float(summary_df.loc[summary_df["summary"] == "mean", c].values[0])
+                    std_val = float(summary_df.loc[summary_df["summary"] == "stddev", c].values[0])
+                    min_val = float(summary_df.loc[summary_df["summary"] == "min", c].values[0])
+                    q1_val = float(summary_df.loc[summary_df["summary"] == "25%", c].values[0])
+                    med_val = float(summary_df.loc[summary_df["summary"] == "50%", c].values[0])
+                    q3_val = float(summary_df.loc[summary_df["summary"] == "75%", c].values[0])
+                    max_val = float(summary_df.loc[summary_df["summary"] == "max", c].values[0])
+                    rows.append({
+                        "column": c,
+                        "n": int(cnt),
+                        "n_missing": int(n_total - cnt),
+                        "mean": round(mean_val, 6),
+                        "std": round(std_val, 6),
+                        "min": min_val,
+                        "q1": q1_val,
+                        "median": med_val,
+                        "q3": q3_val,
+                        "max": max_val
+                    })
+                except Exception:
+                    pass
+            return pl.DataFrame(rows)
 
-        # Execute each column individually (safest for wide tables)
         rows = []
         for c in cols:
             qc = f'"{c}"'
@@ -293,6 +325,22 @@ class DataLoader:
         """Return missing count and % for all columns."""
         cols    = self.get_columns()
         n_total = self.count_rows()
+        
+        if self.execution_mode == "spark" and self._spark is not None:
+            from pyspark.sql import functions as F
+            sdf = self._spark.table(self._table)
+            rows = []
+            for batch in _batched(cols, 100):
+                null_exprs = [F.sum(F.col(f"`{c}`").isNull().cast("int")).alias(c) for c in batch]
+                null_row = sdf.select(null_exprs).collect()[0].asDict()
+                for col, cnt in null_row.items():
+                    rows.append({
+                        "column": col,
+                        "missing_count": int(cnt or 0),
+                        "missing_pct": round(int(cnt or 0) / max(n_total, 1) * 100, 4)
+                    })
+            return pl.DataFrame(rows)
+
         rows    = []
         for batch in _batched(cols, _BATCH_COLS):
             cases = ", ".join(
@@ -312,6 +360,17 @@ class DataLoader:
 
     def get_cardinality(self, cols: List[str]) -> Dict[str, int]:
         """Return approximate cardinality for each column."""
+        if self.execution_mode == "spark" and self._spark is not None:
+            from pyspark.sql import functions as F
+            sdf = self._spark.table(self._table)
+            result = {}
+            for batch in _batched(cols, 100):
+                card_exprs = [F.countDistinct(F.col(f"`{c}`")).alias(c) for c in batch]
+                card_row = sdf.select(card_exprs).collect()[0].asDict()
+                for col, card in card_row.items():
+                    result[col] = int(card or 0)
+            return result
+
         result = {}
         for batch in _batched(cols, _BATCH_COLS):
             cases = ", ".join(
@@ -327,6 +386,19 @@ class DataLoader:
     def column_value_counts(self, col: str, top_n: int = 10) -> pl.DataFrame:
         """Top N value frequencies for a column."""
         n = self.count_rows()
+        if self.execution_mode == "spark" and self._spark is not None:
+            from pyspark.sql import functions as F
+            sdf = self._spark.table(self._table)
+            res = sdf.groupBy(f"`{col}`").count().orderBy(F.col("count").desc()).limit(top_n).collect()
+            return pl.DataFrame([
+                {
+                    "value": r[0],
+                    "count": int(r[1]),
+                    "pct": round(int(r[1]) * 100.0 / max(n, 1), 4)
+                }
+                for r in res
+            ])
+
         try:
             res = self._con.execute(
                 f"SELECT \"{col}\" AS value, COUNT(*) AS count, "
@@ -341,20 +413,10 @@ class DataLoader:
             return pl.DataFrame()
 
     def get_target_distribution(self) -> pl.DataFrame:
-        t = self.target_col
-        n = self.count_rows()
-        try:
-            res = self._con.execute(
-                f"SELECT \"{t}\" AS target_value, COUNT(*) AS count, "
-                f"ROUND(COUNT(*)*100.0/{n},4) AS pct "
-                f"FROM {self._table} "
-                f"GROUP BY \"{t}\" ORDER BY \"{t}\""
-            ).fetchall()
-            return pl.DataFrame([
-                {"target_value": r[0], "count": int(r[1]), "pct": float(r[2])} for r in res
-            ])
-        except Exception:
-            return pl.DataFrame()
+        df = self.column_value_counts(self.target_col)
+        if not df.is_empty() and "value" in df.columns:
+            return df.rename({"value": "target_value"})
+        return df
 
     # ── IV / WoE ──────────────────────────────────────────────────────
 
@@ -365,15 +427,62 @@ class DataLoader:
     ) -> Tuple[float, pl.DataFrame]:
         """
         Compute Information Value and WoE for a numeric column.
-
-        Returns
-        -------
-        iv     : float
-        woe_df : pl.DataFrame with columns [bin, count, events, non_events, woe, iv_contrib]
         """
         t = self.target_col
+        if self.execution_mode == "spark" and self._spark is not None:
+            from pyspark.ml.feature import QuantileDiscretizer
+            from pyspark.sql import functions as F
+            try:
+                sdf = self._spark.table(self._table).select(f"`{col}`", f"`{t}`")
+                sdf_clean = sdf.na.drop()
+                qd = QuantileDiscretizer(numBuckets=n_bins, inputCol=col, outputCol="bin", relativeError=0.01, handleInvalid="skip")
+                bucketed = qd.fit(sdf_clean).transform(sdf_clean)
+                agg = bucketed.groupBy("bin").agg(
+                    F.sum(F.col(f"`{t}`").cast("int")).alias("events"),
+                    F.count("*").alias("total")
+                ).collect()
+                
+                woe_rows = []
+                total_ev = 0
+                total_nev = 0
+                bins_dict = {}
+                for r in agg:
+                    b = int(r["bin"])
+                    ev = int(r["events"] or 0)
+                    total = int(r["total"] or 0)
+                    nev = total - ev
+                    bins_dict[b] = {"ev": ev, "nev": nev}
+                    total_ev += ev
+                    total_nev += nev
+                
+                if total_ev == 0 or total_nev == 0:
+                    return 0.0, pl.DataFrame()
+                
+                iv_total = 0.0
+                for b in sorted(bins_dict):
+                    ev = bins_dict[b]["ev"]
+                    nev = bins_dict[b]["nev"]
+                    dist_ev = ev / total_ev
+                    dist_nev = nev / total_nev
+                    if dist_ev > 0 and dist_nev > 0:
+                        woe = np.log(dist_ev / dist_nev)
+                        iv_c = (dist_ev - dist_nev) * woe
+                    else:
+                        woe = 0.0
+                        iv_c = 0.0
+                    iv_total += iv_c
+                    woe_rows.append({
+                        "bin": b,
+                        "events": ev,
+                        "non_events": nev,
+                        "woe": round(woe, 6),
+                        "iv_contrib": round(iv_c, 6)
+                    })
+                return round(iv_total, 6), pl.DataFrame(woe_rows)
+            except Exception:
+                return 0.0, pl.DataFrame()
+
         try:
-            # Create decile bins via DuckDB NTILE
             res = self._con.execute(
                 f"SELECT "
                 f"  NTILE({n_bins}) OVER (ORDER BY \"{col}\") AS bin, "
@@ -385,7 +494,6 @@ class DataLoader:
             if not res:
                 return 0.0, pl.DataFrame()
 
-            # Aggregate by bin
             from collections import defaultdict
             bins: Dict[int, Dict] = defaultdict(lambda: {"ev": 0, "nev": 0})
             for row in res:
