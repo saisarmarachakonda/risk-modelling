@@ -3,6 +3,7 @@ project:
   author: "Risk Analytics Team"
   version: "1.0.0"
   description: "End-to-end binary classification pipeline for credit risk modelling"
+  execution_mode: "python"            # python | spark (defines data loading and processing mode)
 
 data:
   input_path: "data/performance.csv"

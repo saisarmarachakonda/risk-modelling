@@ -45,6 +45,8 @@ class DataLoader:
         self._threads  = mem_cfg.get("duckdb_threads", 4)
         self._mem_lim  = mem_cfg.get("duckdb_memory_limit", "6GB")
 
+        self.execution_mode = config.get("project", {}).get("execution_mode", "python").lower()
+        self._spark = None
         self._con: Optional[duckdb.DuckDBPyConnection] = None
         self._table = "input_data"
         self._cols: Optional[List[str]] = None
@@ -53,6 +55,24 @@ class DataLoader:
     # ── Connection & registration ─────────────────────────────────────
 
     def _connect(self):
+        if self.execution_mode == "spark":
+            try:
+                from pyspark.sql import SparkSession
+                spark_cfg = self.config.get("spark", {})
+                builder = SparkSession.builder.appName(spark_cfg.get("app_name", "Risk Modelling Spark Processor"))
+                builder = builder.master(spark_cfg.get("master", "local[*]"))
+                
+                builder = builder.config("spark.driver.memory", spark_cfg.get("driver_memory", "8g"))
+                builder = builder.config("spark.executor.memory", spark_cfg.get("executor_memory", "8g"))
+                builder = builder.config("spark.executor.cores", spark_cfg.get("executor_cores", 4))
+                builder = builder.config("spark.sql.shuffle.partitions", spark_cfg.get("sql_shuffle_partitions", 200))
+                
+                self._spark = builder.getOrCreate()
+                print("\n[INFO] Successfully initialized PySpark Session in SPARK mode!")
+            except Exception as e:
+                print(f"\n[WARNING] Failed to initialize Spark session ({e}). Falling back to DuckDB (PYTHON mode).")
+                self.execution_mode = "python"
+
         self._con = duckdb.connect(":memory:")
         self._con.execute(f"SET threads={self._threads}")
         self._con.execute(f"SET memory_limit='{self._mem_lim}'")
@@ -61,23 +81,39 @@ class DataLoader:
     def _register(self):
         p = str(self.input_path)
         null_str = ", ".join(f"'{n}'" for n in self._nulls)
-        
-        # Load performance file as VIEW
-        self._con.execute(
-            f"CREATE OR REPLACE VIEW perf_raw AS "
-            f"SELECT * FROM read_csv_auto('{p}', sep='{self._sep}', nullstr=[{null_str}], header=true)"
-        )
-        
-        # Load and join each feature file as VIEW
         feat_files = self.config.get("data", {}).get("feature_files", [])
         id_col = self.config.get("data", {}).get("id_column", "record_id")
         
-        for idx, fpath in enumerate(feat_files):
-            tbl_alias = f"feat_{idx}"
+        if self.execution_mode == "spark" and self._spark is not None:
+            try:
+                print(f"[INFO] Loading data via PySpark engine (Spark mode)...")
+                df_spark = self._spark.read.options(header=True, inferSchema=True, delimiter=self._sep).csv(p)
+                self._con.register("perf_raw_spark", df_spark)
+                self._con.execute("CREATE OR REPLACE VIEW perf_raw AS SELECT * FROM perf_raw_spark")
+                
+                for idx, fpath in enumerate(feat_files):
+                    tbl_alias = f"feat_{idx}"
+                    df_feat_spark = self._spark.read.options(header=True, inferSchema=True, delimiter=self._sep).csv(fpath)
+                    self._con.register(f"{tbl_alias}_spark", df_feat_spark)
+                    self._con.execute(f"CREATE OR REPLACE VIEW {tbl_alias} AS SELECT * FROM {tbl_alias}_spark")
+            except Exception as e:
+                print(f"\n[WARNING] Spark loading failed: {e}. Falling back to default DuckDB loader.")
+                self.execution_mode = "python"
+
+        if self.execution_mode == "python" or self._spark is None:
+            # Load performance file as VIEW
             self._con.execute(
-                f"CREATE OR REPLACE VIEW {tbl_alias} AS "
-                f"SELECT * FROM read_csv_auto('{fpath}', sep='{self._sep}', nullstr=[{null_str}], header=true)"
+                f"CREATE OR REPLACE VIEW perf_raw AS "
+                f"SELECT * FROM read_csv_auto('{p}', sep='{self._sep}', nullstr=[{null_str}], header=true)"
             )
+            
+            # Load and join each feature file as VIEW
+            for idx, fpath in enumerate(feat_files):
+                tbl_alias = f"feat_{idx}"
+                self._con.execute(
+                    f"CREATE OR REPLACE VIEW {tbl_alias} AS "
+                    f"SELECT * FROM read_csv_auto('{fpath}', sep='{self._sep}', nullstr=[{null_str}], header=true)"
+                )
             
         # Join query builder
         join_query = "FROM perf_raw p"
@@ -398,6 +434,12 @@ class DataLoader:
         if self._con:
             self._con.close()
             self._con = None
+        if self._spark:
+            try:
+                self._spark.stop()
+            except Exception:
+                pass
+            self._spark = None
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
