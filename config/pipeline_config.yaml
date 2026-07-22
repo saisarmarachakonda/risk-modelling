@@ -41,6 +41,16 @@ memory:
   duckdb_threads: 4
   duckdb_memory_limit: "6GB"
 
+spark:
+  app_name: "Risk Modelling Spark Processor"
+  master: "local[*]"
+  driver_memory: "8g"
+  executor_memory: "8g"
+  executor_cores: 4
+  sql_shuffle_partitions: 200
+  warehouse_dir: "spark-warehouse"
+  checkpoint_dir: "artifacts/checkpoints"
+
 preprocessing:
   numeric_imputation: "median"      # mean | median | constant
   categorical_imputation: "mode"    # mode | constant | unknown
